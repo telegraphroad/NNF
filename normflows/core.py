@@ -42,7 +42,7 @@ class NormalizingFlow(nn.Module):
         else:
             return z,-torch.mean(log_q)
 
-    def reverse_kld(self, num_samples=1, beta=1.0, score_fn=True, extended=False):
+    def reverse_kld(self, num_samples=1, beta=1.0, score_fn=True, extended=False,z=None,log_q_=None):
         """
         Estimates reverse KL divergence, see arXiv 1912.02762
         :param num_samples: Number of samples to draw from base distribution
@@ -51,7 +51,12 @@ class NormalizingFlow(nn.Module):
         arXiv 1703.09194
         :return: Estimate of the reverse KL divergence averaged over latent samples
         """
-        z, log_q_ = self.q0(num_samples)
+        if z is None:
+            z, log_q_ = self.q0(num_samples)
+            with torch.no_grad():
+                z = z.float()
+                log_q_ = log_q_.float()
+        
         print('================',log_q_.shape)
         log_q = torch.zeros_like(log_q_)
         log_q += log_q_
@@ -72,6 +77,48 @@ class NormalizingFlow(nn.Module):
             return torch.mean(log_q) - beta * torch.mean(log_p)
         else:
             return z, torch.mean(log_q) - beta * torch.mean(log_p)
+
+
+
+
+    def backward(self, num_samples=1, beta=1.0, score_fn=True,z=None,log_q_=None):
+        """
+        Estimates reverse KL divergence, see arXiv 1912.02762
+        :param num_samples: Number of samples to draw from base distribution
+        :param beta: Annealing parameter, see arXiv 1505.05770
+        :param score_fn: Flag whether to include score function in gradient, see
+        arXiv 1703.09194
+        :return: Estimate of the reverse KL divergence averaged over latent samples
+        """
+        if z is None:
+            z, log_q_ = self.q0(num_samples)
+            with torch.no_grad():
+                z = z.float()
+                log_q_ = log_q_.float()
+
+        print('================',log_q_.shape)
+        log_q = torch.zeros_like(log_q_)
+        log_q += log_q_
+        for flow in self.flows:
+            z, log_det = flow(z)
+            log_q -= log_det
+        if not score_fn:
+            z_ = z
+            log_q = torch.zeros(len(z_), device=z_.device)
+            utils.set_requires_grad(self, False)
+            for i in range(len(self.flows) - 1, -1, -1):
+                z_, log_det = self.flows[i].inverse(z_)
+                log_q += log_det
+            log_q += self.q0.log_prob(z_)
+            utils.set_requires_grad(self, True)
+        #log_p = self.p.log_prob(z)
+        #if extended == False:
+        #    return torch.mean(log_q) - beta * torch.mean(log_p)
+        #else:
+        return z
+
+
+
 
     def reverse_alpha_div(self, num_samples=1, alpha=1, dreg=False):
         """
