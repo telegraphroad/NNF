@@ -103,6 +103,8 @@ class NormalizingFlow(nn.Module):
         :return: Samples, log probability
         """
         z, log_q = self.q0(num_samples)
+        with torch.no_grad():
+            z = z.float()
         for flow in self.flows:
             z, log_det = flow(z)
             log_q -= log_det
