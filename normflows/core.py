@@ -23,7 +23,7 @@ class NormalizingFlow(nn.Module):
         self.flows = nn.ModuleList(flows)
         self.p = p
 
-    def forward_kld(self, x):
+    def forward_kld(self, x, extended=False):
         """
         Estimates forward KL divergence, see arXiv 1912.02762
         :param x: Batch sampled from target distribution
@@ -35,9 +35,12 @@ class NormalizingFlow(nn.Module):
             z, log_det = self.flows[i].inverse(z)
             log_q += log_det
         log_q += self.q0.log_prob(z)
-        return -torch.mean(log_q)
+        if extended == False:
+            return -torch.mean(log_q)
+        else:
+            return z,-torch.mean(log_q)
 
-    def reverse_kld(self, num_samples=1, beta=1.0, score_fn=True):
+    def reverse_kld(self, num_samples=1, beta=1.0, score_fn=True, extended=False):
         """
         Estimates reverse KL divergence, see arXiv 1912.02762
         :param num_samples: Number of samples to draw from base distribution
@@ -62,7 +65,10 @@ class NormalizingFlow(nn.Module):
             log_q += self.q0.log_prob(z_)
             utils.set_requires_grad(self, True)
         log_p = self.p.log_prob(z)
-        return torch.mean(log_q) - beta * torch.mean(log_p)
+        if extended == False:
+            return torch.mean(log_q) - beta * torch.mean(log_p)
+        else:
+            return z, torch.mean(log_q) - beta * torch.mean(log_p)
 
     def reverse_alpha_div(self, num_samples=1, alpha=1, dreg=False):
         """
@@ -94,7 +100,10 @@ class NormalizingFlow(nn.Module):
             loss = -alpha * torch.mean(weights * torch.log(w))
         else:
             loss = np.sign(alpha - 1) * torch.logsumexp(alpha * (log_p - log_q), 0)
-        return loss
+        if extended == False:
+            return loss
+        else: 
+            return z, loss
 
     def sample(self, num_samples=1):
         """
