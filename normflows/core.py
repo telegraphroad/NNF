@@ -95,6 +95,7 @@ class NormalizingFlow(nn.Module):
             with torch.no_grad():
                 z = z.float()
                 log_q_ = log_q_.float()
+                print(z.shape,log_q_.shape)
 
         print('================',log_q_.shape)
         log_q = torch.zeros_like(log_q_)
