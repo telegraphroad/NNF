@@ -74,7 +74,7 @@ class GaussianMixture(BaseDistribution):
             #a = np.linspace(-10, 10, self.n_modes)
             #loc = np.random.randn(self.n_modes, self.dim)#np.vstack([a]*4).T
             #loc = np.vstack([a] * self.dim).T
-            r = np.arange(0,0.2-0.00001,0.2/self.n_modes)
+            r = np.arange(0,2.0-0.00001,2.0/self.n_modes)
             loc = np.tile(r,[self.dim,1]).T
             #loc = np.random.randn(self.n_modes, self.dim) * 1.5
             #loc = np.zeros((self.n_modes, self.dim))
