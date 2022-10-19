@@ -84,7 +84,7 @@ class GaussianMixture(BaseDistribution):
         self.oloc = copy.copy(loc)
         if scale is None:
             #scale = np.random.rand(self.n_modes, self.dim)
-            r = np.arange(4.,8.-0.000001,4./self.n_modes)
+            r = np.arange(.5,1.5-0.000001,1./self.n_modes)
             scale = np.tile(r,[self.dim,1]).T
             #print('===========scale',scale.shape)
             #scale = np.ones((self.n_modes, self.dim))
