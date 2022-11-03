@@ -1,7 +1,7 @@
 import torch
 #torch.autograd.set_detect_anomaly(True)
 import numpy as np
-import normflow as nf
+import normflows as nf
 
 from matplotlib import pyplot as plt
 from tqdm import tqdm
@@ -18,7 +18,7 @@ import pickle
 from torch.utils.data import DataLoader, TensorDataset, random_split
 from sklearn.preprocessing import MinMaxScaler
 from collections import Counter
-
+import torch.distributions as D
 
 # Set up model
 
@@ -26,7 +26,7 @@ from collections import Counter
 
 import argparse
 
-from normflow import utils
+from normflows import utils
  
 parser = argparse.ArgumentParser(description="Just an example",
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -57,7 +57,7 @@ print(cb,mb,sc,nc,nu,tparam,based)
 #         for sc in [1.,2.,3.,4.,5.]:
 #             for nc in [2,3,4,5,6,7,8,9,10,12,15,20,25,30,40,50,100,200,300,500,1000]:        
 max_iter = 15000
-num_samples = 2 ** 11
+num_samples = 2 ** 12
 anneal_iter = 12000
 annealing = True
 show_iter = 25
@@ -69,7 +69,7 @@ show_iter = 25
 K = nu
 torch.manual_seed(0)
 
-latent_size = 16
+latent_size = 3
 b = torch.Tensor([1 if i % 2 == 0 else 0 for i in range(latent_size)])
 flows = []
 
@@ -108,9 +108,9 @@ for i in range(K):
     flows += [nf.flows.ActNorm(latent_size)]
 
 # Set prior and q0
-prior = nf.distributions.target.NealsFunnel(v1shift = mb, v2shift = 0.)
+#prior = nf.distributions.target.NealsFunnel(v1shift = mb, v2shift = 0.)
 #q0 = nf.distributions.DiagGaussian(2)
-q0 = nf.distributions.base.MultivariateGaussian()
+#q0 = nf.distributions.base.MultivariateGaussian()
 
 
 weight = torch.ones(nc,device='cuda')
@@ -157,13 +157,14 @@ s2 = pd.DataFrame(c1.sample([4000]).detach().cpu().numpy())
 s1['class'] = 0
 s2['class'] = 1
 s = s1.append(s2)
+xcol = s.columns
 X = s.values
 
 
 X = torch.tensor(X, dtype=torch.float32)
 dataset = TensorDataset(X)
 
-train_loader = torch.utils.data.DataLoader(dataset, batch_size=num_samples,num_workers=4)
+train_loader = torch.utils.data.DataLoader(dataset, batch_size=num_samples,num_workers=4,shuffle=True)
 train_iter = iter(train_loader)
 
 # Move model on GPU if available
@@ -213,7 +214,7 @@ def plot_grad_flow(named_parameters):
 loss_hist = np.array([])
 
 optimizer = torch.optim.Adam(nfm.parameters(), lr=1e-4, weight_decay=1e-6)
-sample0,_ = nfm.sample(20000)
+sample0,_ = nfm.sample(20000)#.detach().cpu().numpy()
 sample0 = pd.DataFrame(sample0.cpu().detach().numpy())
 gzarr = []
 gzparr = []
@@ -298,7 +299,7 @@ for it in tqdm(range(max_iter)):
             # plot_grad_flow(nfm.named_parameters())
 
         loss_hist = np.append(loss_hist, loss.to('cpu').data.numpy())
-        logq.append(logqep.detach().cpu().numpy())
+        logq.append(log_q.detach().cpu().numpy())
 
         pm = {n:p.detach().cpu().numpy() for n, p in nfm.named_parameters()}
 
@@ -325,8 +326,8 @@ for it in tqdm(range(max_iter)):
             
 
 
-            gzarr.append(zarr)
-            gzparr.append(zparr)
+            gzarr.append(z_layers)
+            gzparr.append(ld_layers)
             phist.append([a.detach().cpu().numpy() for a in q0.parameters()])
             
             
@@ -357,7 +358,7 @@ for it in tqdm(range(max_iter)):
         #     plt.contour(xx, yy, prob_prior.data.numpy(), cmap=plt.get_cmap('cool'), linewidths=2)
         #     plt.gca().set_aspect('equal', 'box')
         #     plt.show()
-        if loss.to('cpu').data.item()<closs:
+        if loss.to('cpu').data.item()<closs and torch.isnan(nfm.sample(3000)[0]).sum().item() == 0:
             closs = loss.to('cpu').data.item()
             nfmBest.state_dict = nfm.state_dict
             q1.parameters = q0.parameters

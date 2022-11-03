@@ -41,14 +41,14 @@ class NormalizingFlow(nn.Module):
         log_q = torch.zeros(len(x), device=x.device)
         log_qt = torch.zeros(len(x), device=x.device)
         z = x
-        if self.categoricals:
+        if self.categoricals is not None:
             zc = x[:,self.categoricals]
         z_layers = []
         ld_layers = []
 
         with torch.no_grad():
             z = z.float()
-        if self.categoricals:
+        if self.categoricals is not None:
             for vcn in range(len(self.categoricals)):
                 zct, log_det = self.vdeqs[vcn].forward(z=zc[:,vcn].view([zc.shape[0],1]),ldj=log_q,reverse=False)
                 zc[:,vcn] = zct.squeeze()
@@ -194,6 +194,15 @@ class NormalizingFlow(nn.Module):
         for flow in self.flows:
             z, log_det = flow(z)
             log_q -= log_det
+        if self.categoricals is not None:
+            zc = z[:,self.categoricals]
+            for vcn in range(len(self.categoricals)):
+                zct, log_det = self.vdeqs[vcn].forward(z=zc[:,vcn].view([zc.shape[0],1]),ldj=log_q,reverse=True)
+                zc[:,vcn] = zct.squeeze()
+            log_q += log_det
+        # log_q = log_qt # ??is this necessary?
+            z[:,self.categoricals] = zc
+
         return z, log_q
 
     def log_prob(self, x):

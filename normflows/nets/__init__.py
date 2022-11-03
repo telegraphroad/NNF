@@ -7,3 +7,5 @@ from .resnet import ResidualNet, ConvResidualNet
 from .lipschitz import LipschitzMLP, LipschitzCNN, InducedNormLinear, InducedNormConv2d
 
 from .made import MADE
+
+from .varquant import VariationalDequantization

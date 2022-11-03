@@ -7,3 +7,4 @@ from .optim import clear_grad, set_requires_grad, update_lipschitz
 from .preprocessing import Logit, Jitter, Scale
 
 from . import masks
+from . import utils
