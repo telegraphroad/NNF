@@ -1,5 +1,7 @@
+from eagerpy import squeeze
 import torch
 import torch.nn as nn
+import math
 import numpy as np
 
 from . import distributions
@@ -11,7 +13,7 @@ class NormalizingFlow(nn.Module):
     Normalizing Flow model to approximate target distribution
     """
 
-    def __init__(self, q0, flows, p=None):
+    def __init__(self, q0, flows, p=None, categoricals = None, catlevels=None, catvdeqs=None):
         """
         Constructor
         :param q0: Base distribution
@@ -23,6 +25,13 @@ class NormalizingFlow(nn.Module):
         self.flows = nn.ModuleList(flows)
         self.p = p
 
+        if categoricals is not None:
+            self.categoricals = categoricals
+            self.vdeqs = nn.ModuleList(catvdeqs)
+            self.catlevels = catlevels
+        else:
+            self.categoricals = None
+
     def forward_kld(self, x, extended=False):
         """
         Estimates forward KL divergence, see arXiv 1912.02762
@@ -30,17 +39,34 @@ class NormalizingFlow(nn.Module):
         :return: Estimate of forward KL divergence averaged over batch
         """
         log_q = torch.zeros(len(x), device=x.device)
+        log_qt = torch.zeros(len(x), device=x.device)
         z = x
+        if self.categoricals:
+            zc = x[:,self.categoricals]
+        z_layers = []
+        ld_layers = []
+
         with torch.no_grad():
             z = z.float()
+        if self.categoricals:
+            for vcn in range(len(self.categoricals)):
+                zct, log_det = self.vdeqs[vcn].forward(z=zc[:,vcn].view([zc.shape[0],1]),ldj=log_q,reverse=False)
+                zc[:,vcn] = zct.squeeze()
+            log_q += log_det
+        # log_q = log_qt # ??is this necessary?
+        z[:,self.categoricals] = zc.float()
+
         for i in range(len(self.flows) - 1, -1, -1):
             z, log_det = self.flows[i].inverse(z)
+            if extended:
+                z_layers.append(z.cpu().detach().numpy())
+                ld_layers.append(log_det.cpu().detach().numpy())
             log_q += log_det
         log_q += self.q0.log_prob(z)
         if extended == False:
             return -torch.mean(log_q)
         else:
-            return z,-torch.mean(log_q)
+            return -torch.mean(log_q), z, log_q, z_layers, ld_layers
 
     def reverse_kld(self, num_samples=1, beta=1.0, score_fn=True, extended=False,z=None,log_q_=None):
         """
