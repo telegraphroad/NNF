@@ -1,0 +1,32 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Current File",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": [
+                "-t",
+                "Loan",
+                "-nc",
+                "1",
+                "-cb",
+                "4.0",
+                "-trainable",
+                "1",
+                "-nu",
+                "1",
+                "-p",
+                "8.0",
+                "-b",
+                "MixtureofGaussians"
+            ]
+        }
+    ]
+}

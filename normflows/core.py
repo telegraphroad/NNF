@@ -48,23 +48,23 @@ class NormalizingFlow(nn.Module):
 
         with torch.no_grad():
             z = z.float()
-        if self.categoricals is not None:
+        if self.categoricals is not None and len(self.categoricals) >0:
             for vcn in range(len(self.categoricals)):
                 zct, log_det = self.vdeqs[vcn].forward(z=zc[:,vcn].view([zc.shape[0],1]),ldj=log_q,reverse=False)
                 zc[:,vcn] = zct.squeeze()
             log_q += log_det
-        # log_q = log_qt # ??is this necessary?
-        z[:,self.categoricals] = zc.float()
+            # log_q = log_qt # ??is this necessary?
+            z[:,self.categoricals] = zc.float()
 
         for i in range(len(self.flows) - 1, -1, -1):
             z, log_det = self.flows[i].inverse(z)
             if extended:
                 z_layers.append(z.cpu().detach().numpy())
-                ld_layers.append(log_det.cpu().detach().numpy())
+                ld_layers.append(log_det)#.cpu().detach().numpy())
             log_q += log_det
         log_q += self.q0.log_prob(z)
         if extended == False:
-            return -torch.mean(log_q)
+            return z,-torch.mean(log_q)
         else:
             return -torch.mean(log_q), z, log_q, z_layers, ld_layers
 

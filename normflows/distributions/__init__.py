@@ -4,11 +4,11 @@ from .base import (
     ClassCondDiagGaussian,
     GlowBase,
     AffineGaussian,
-    GaussianMixture,
+    MixtureofGaussians,
     GaussianPCA,
     UniformGaussian,
 )
-from .target import Target, TwoMoons, CircularGaussianMixture, RingMixture
+from .target import Target, TwoMoons, CircularGaussianMixture, RingMixture, NealsFunnel, StudentTDist,chi2Dist,FrechetDist, ParetoDist,CauchyDist,lognorm
 
 from .encoder import BaseEncoder, Dirac, Uniform, NNDiagGaussian
 from .decoder import BaseDecoder, NNDiagGaussianDecoder, NNBernoulliDecoder

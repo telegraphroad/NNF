@@ -21,6 +21,15 @@ from typing import Dict
 from scipy.stats import gennorm
 import torch
 from torch.distributions import Gamma, MultivariateNormal, StudentT
+from numbers import Number
+import torch
+from torch.distributions import constraints, Gamma, MultivariateNormal
+from torch.distributions.multivariate_normal import _batch_mv, _batch_mahalanobis
+from torch.distributions.distribution import Distribution
+from torch.distributions.utils import broadcast_all, _standard_normal
+from scipy import stats
+import math
+
 
 from pyro.distributions import MultivariateStudentT
 from .. import flows
@@ -51,100 +60,6 @@ class BaseDistribution(nn.Module):
         """
         raise NotImplementedError
 
-class GaussianMixture(BaseDistribution):
-    """
-    Mixture of Gaussians with diagonal covariance matrix
-    """
-    def __init__(self, n_modes, dim, loc=None, scale=None, weights=None, trainable=True):
-        """
-        Constructor
-        :param n_modes: Number of modes of the mixture model
-        :param dim: Number of dimensions of each Gaussian
-        :param loc: List of mean values
-        :param scale: List of diagonals of the covariance matrices
-        :param weights: List of mode probabilities
-        :param trainable: Flag, if true parameters will be optimized during training
-        """
-        super().__init__()
-
-        self.n_modes = n_modes
-        self.dim = dim
-
-        if loc is None:
-            #a = np.linspace(-10, 10, self.n_modes)
-            #loc = np.random.randn(self.n_modes, self.dim)#np.vstack([a]*4).T
-            #loc = np.vstack([a] * self.dim).T
-            r = np.arange(0,8.0-0.00001,2.0/self.n_modes)
-            loc = np.tile(r,[self.dim,1]).T
-            #loc = np.random.randn(self.n_modes, self.dim) * 1.5
-            #loc = np.zeros((self.n_modes, self.dim))
-            #print(loc.shape)
-        
-        loc = np.array(loc)[None, ...]
-        self.oloc = copy.copy(loc)
-        if scale is None:
-            #scale = np.random.rand(self.n_modes, self.dim)
-            r = np.arange(.5,1.5-0.000001,1./self.n_modes)
-            scale = np.tile(r,[self.dim,1]).T
-            #print('===========scale',scale.shape)
-            #scale = np.ones((self.n_modes, self.dim))
-            #print('+++++++++++scale',scale.shape)
-        scale = np.array(scale)[None, ...]
-        self.oscale = copy.copy(scale)
-        if weights is None:
-            weights = np.random.randn(self.n_modes) + 5.
-        weights = np.array(weights)[None, ...]
-        weights /= weights.sum(1)
-
-        if trainable:
-            self.loc = nn.Parameter(torch.tensor(1. * loc))
-            self.log_scale = nn.Parameter(torch.tensor(np.log(1. * scale)))
-            self.weight_scores = nn.Parameter(torch.tensor(np.log(1. * weights)))
-
-        else:
-            self.register_buffer("loc", torch.tensor(1. * loc))
-            self.register_buffer("log_scale", torch.tensor(np.log(1. * scale)))
-            self.register_buffer("weight_scores", torch.tensor(np.log(1. * weights)))
-        
-        
-    def forward(self, num_samples=1):
-        
-        # Get weights
-        weights = torch.softmax(self.weight_scores, 1)
-
-        # Sample mode indices
-        mode = torch.multinomial(weights[0, :], num_samples, replacement=True)
-        mode_1h = nn.functional.one_hot(mode, self.n_modes)
-        mode_1h = mode_1h[..., None]
-
-        # Get samples
-        eps_ = torch.randn(num_samples, self.dim, dtype=self.loc.dtype, device=self.loc.device)
-        scale_sample = torch.sum(torch.exp(self.log_scale) * mode_1h, 1)
-        loc_sample = torch.sum(self.loc * mode_1h, 1)
-        z = eps_ * scale_sample + loc_sample
-
-        # Compute log probability
-        eps = (z[:, None, :] - self.loc) / torch.exp(self.log_scale)
-        log_p = - 0.5 * self.dim * np.log(2 * np.pi) + torch.log(weights)\
-                - 0.5 * torch.sum(torch.pow(eps, 2), 2) \
-                - torch.sum(self.log_scale, 2)
-        log_p = torch.logsumexp(log_p, 1)
-
-        return z, log_p
-
-    def log_prob(self, z):
-        
-        # Get weights
-        weights = torch.softmax(self.weight_scores, 1)
-
-        # Compute log probability
-        eps = (z[:, None, :] - self.loc) / torch.exp(self.log_scale)
-        log_p = - 0.5 * self.dim * np.log(2 * np.pi) + torch.log(weights) \
-                - 0.5 * torch.sum(torch.pow(eps, 2), 2) \
-                - torch.sum(self.log_scale, 2)
-        log_p = torch.logsumexp(log_p, 1)
-
-        return log_p
 
 class DiagGaussian(BaseDistribution):
     """
@@ -560,14 +475,167 @@ class AffineGaussian(BaseDistribution):
         return log_p
 
 
-class GaussianMixture(BaseDistribution):
+
+class GaussianPCA(BaseDistribution):
+    """
+    Gaussian distribution resulting from linearly mapping a normal distributed latent
+    variable describing the "content of the target"
+    """
+
+    def __init__(self, dim, latent_dim=None, sigma=0.1):
+        """
+        Constructor
+        :param dim: Number of dimensions of the flow variables
+        :param latent_dim: Number of dimensions of the latent "content" variable;
+                           if None it is set equal to dim
+        :param sigma: Noise level
+        """
+        super().__init__()
+
+        self.dim = dim
+        if latent_dim is None:
+            self.latent_dim = dim
+        else:
+            self.latent_dim = latent_dim
+
+        self.loc = nn.Parameter(torch.ones(1, dim))
+        self.W = nn.Parameter(torch.randn(latent_dim, dim))
+        self.log_sigma = nn.Parameter(torch.tensor(np.log(sigma)))
+
+    def forward(self, num_samples=1):
+        eps = torch.randn(
+            num_samples, self.latent_dim, dtype=self.loc.dtype, device=self.loc.device
+        )
+        z_ = torch.matmul(eps, self.W)
+        z = z_ + self.loc
+
+        Sig = torch.matmul(self.W.T, self.W) + torch.exp(
+            self.log_sigma * 2
+        ) * torch.eye(self.dim, dtype=self.loc.dtype, device=self.loc.device)
+        log_p = (
+            self.dim / 2 * np.log(2 * np.pi)
+            - 0.5 * torch.det(Sig)
+            - 0.5 * torch.sum(z_ * torch.matmul(z_, torch.inverse(Sig)), 1)
+        )
+
+        return z, log_p
+
+    def log_prob(self, z):
+        z_ = z - self.loc
+
+        Sig = torch.matmul(self.W.T, self.W) + torch.exp(
+            self.log_sigma * 2
+        ) * torch.eye(self.dim, dtype=self.loc.dtype, device=self.loc.device)
+        log_p = (
+            self.dim / 2 * np.log(2 * np.pi)
+            - 0.5 * torch.det(Sig)
+            - 0.5 * torch.sum(z_ * torch.matmul(z_, torch.inverse(Sig)), 1)
+        )
+
+        return log_p
+
+
+
+
+class GeneralizedNormal(Distribution):
+    r"""
+    Creates a Generalized Normal distribution parameterized by :attr:`loc`, :attr:`scale`, and :attr:`beta`.
+    Example::
+        >>> m = GeneralizedNormal(torch.tensor([0.0]), torch.tensor([1.0]), torch.tensor(0.5))
+        >>> m.sample()  # GeneralizedNormal distributed with loc=0, scale=1, beta=0.5
+        tensor([ 0.1337])
+    Args:
+        loc (float or Tensor): mean of the distribution
+        scale (float or Tensor): scale of the distribution
+        beta (float or Tensor): shape parameter of the distribution
+    """
+    arg_constraints = {'loc': constraints.real, 'scale': constraints.positive, 'beta': constraints.positive}
+    support = constraints.real
+    has_rsample = False
+
+    @property
+    def mean(self):
+        return self.loc
+
+    @property
+    def variance(self):
+        return self.scale.pow(2) * (torch.lgamma(3/self.beta) - torch.lgamma(1/self.beta)).exp()
+
+    @property
+    def stddev(self):
+        return self.variance()**0.5
+
+    def __init__(self, loc=5., scale=5., beta=2., validate_args=None):
+
+        self.loc, self.scale = broadcast_all(loc, scale)
+        (self.beta,) = broadcast_all(beta)
+        self.scipy_dist = stats.gennorm(loc=self.loc.cpu().detach().numpy(),
+                            scale=self.scale.cpu().detach().numpy(),
+                            beta=self.beta.cpu().detach().numpy())
+        if isinstance(loc, Number) and isinstance(scale, Number):
+            batch_shape = torch.Size()
+        else:
+            batch_shape = self.loc.size()
+        super(GeneralizedNormal, self).__init__(batch_shape, validate_args=validate_args)
+
+    def expand(self, batch_shape, _instance=None):
+        new = self._get_checked_instance(GeneralizedNormal, _instance)
+        batch_shape = torch.Size(batch_shape)
+        new.loc = self.loc.expand(batch_shape)
+        new.scale = self.scale.expand(batch_shape)
+        super(GeneralizedNormal, new).__init__(batch_shape, validate_args=False)
+        new._validate_args = self._validate_args
+        return new
+
+
+
+
+    def sample(self, sample_shape):
+        sample_shape = torch.Size(sample_shape)
+        sample_shape = sample_shape + self.loc.size()
+        return torch.tensor(self.scipy_dist.rvs(
+            list(sample_shape),
+            random_state=torch.randint(2**32, ()).item()),  # Make deterministic if torch is seeded
+                            dtype=self.loc.dtype, device=self.loc.device)
+
+
+    def log_prob(self, value):
+        if self._validate_args:
+            self._validate_sample(value)
+        return (-torch.log(2 * self.scale) - torch.lgamma(1/self.beta) + torch.log(self.beta)
+                - torch.pow((torch.abs(value - self.loc) / self.scale), self.beta))
+
+    # def forward(self, num_samples=1):
+    #     #print('~~~1',self.gmm.mixture_distribution.probs)
+        
+    #     z = self.sample([num_samples])
+    #     log_prob= self.log_prob(z)
+    #     return z, log_prob
+
+    def cdf(self, value):
+        if isinstance(value, torch.Tensor):
+            value = value.numpy()
+        return torch.tensor(self.scipy_dist.cdf(value),
+                            dtype=self.loc.dtype, device=self.loc.device)
+
+
+    def icdf(self, value):
+        raise NotImplementedError
+
+
+    def entropy(self):
+        return (1/self.beta) - torch.log(self.beta) + torch.log(2*self.scale) + torch.lgamma(1/self.beta)
+
+
+
+
+class MixtureofGaussians(BaseDistribution):
     """
     Mixture of Gaussians with diagonal covariance matrix
     """
 
     def __init__(
-        self, n_modes, dim, loc=None, scale=None, weights=None, trainable=True
-    ):
+        self, n_modes, dim, loc=None, scale=None, weights=None, trainable=True, loc_mult = 5.0):
         """
         Constructor
         :param n_modes: Number of modes of the mixture model
@@ -582,14 +650,23 @@ class GaussianMixture(BaseDistribution):
         self.n_modes = n_modes
         self.dim = dim
 
+        # if loc is None:
+        #     loc = np.random.randn(self.n_modes, self.dim) * loc_mult
+        # loc = np.array(loc)[None, ...]
+        # if scale is None:
+        #     scale = np.random.rand(self.n_modes, self.dim) * loc_mult
         if loc is None:
-            loc = np.random.randn(self.n_modes, self.dim)
+            loc = np.random.rand(self.n_modes, self.dim) * loc_mult
         loc = np.array(loc)[None, ...]
         if scale is None:
-            scale = np.ones((self.n_modes, self.dim))
+            scale = np.random.rand(self.n_modes, self.dim) * loc_mult
+        #print(loc,scale)
+            
+
         scale = np.array(scale)[None, ...]
         if weights is None:
-            weights = np.ones(self.n_modes)
+            weights = np.random.rand(self.n_modes)+ 1.
+            
         weights = np.array(weights)[None, ...]
         weights /= weights.sum(1)
 
@@ -648,60 +725,357 @@ class GaussianMixture(BaseDistribution):
         return log_p
 
 
-class GaussianPCA(BaseDistribution):
-    """
-    Gaussian distribution resulting from linearly mapping a normal distributed latent
-    variable describing the "content of the target"
-    """
 
-    def __init__(self, dim, latent_dim=None, sigma=0.1):
+class T(BaseDistribution):
+    """
+    Normal T
+    """
+    def __init__(self, n_dim=2, df = 2., loc = 5., scale = 2., trainable=False):
         """
         Constructor
-        :param dim: Number of dimensions of the flow variables
-        :param latent_dim: Number of dimensions of the latent "content" variable;
-                           if None it is set equal to dim
-        :param sigma: Noise level
+        :param shape: Tuple with shape of data, if int shape has one dimension
         """
         super().__init__()
 
-        self.dim = dim
-        if latent_dim is None:
-            self.latent_dim = dim
-        else:
-            self.latent_dim = latent_dim
+        
+        self.n_dim = n_dim
+        
 
-        self.loc = nn.Parameter(torch.zeros(1, dim))
-        self.W = nn.Parameter(torch.randn(latent_dim, dim))
-        self.log_sigma = nn.Parameter(torch.tensor(np.log(sigma)))
 
-    def forward(self, num_samples=1):
-        eps = torch.randn(
-            num_samples, self.latent_dim, dtype=self.loc.dtype, device=self.loc.device
-        )
-        z_ = torch.matmul(eps, self.W)
-        z = z_ + self.loc
+        with torch.no_grad():
+            if trainable:
+                self.df = nn.Parameter(torch.rand(self.n_dim,dtype=torch.double,device='cuda') + df, requires_grad = True)
+                self.loc = nn.Parameter(torch.randn(self.n_dim,dtype=torch.double,device='cuda') * loc, requires_grad = True)
+                self.scale = nn.Parameter(torch.rand(self.n_dim,dtype=torch.double,device='cuda') * scale, requires_grad = True)
 
-        Sig = torch.matmul(self.W.T, self.W) + torch.exp(
-            self.log_sigma * 2
-        ) * torch.eye(self.dim, dtype=self.loc.dtype, device=self.loc.device)
-        log_p = (
-            self.dim / 2 * np.log(2 * np.pi)
-            - 0.5 * torch.det(Sig)
-            - 0.5 * torch.sum(z_ * torch.matmul(z_, torch.inverse(Sig)), 1)
-        )
+            else:
+                self.register_buffer("df", torch.ones((self.n_dim,),dtype=torch.double,device='cuda') + df)
 
-        return z, log_p
+        self.t = D.StudentT(df=self.df, loc=self.loc, scale=self.scale)#univ
+
+        
+        #print('=========sample',self.t.log_prob(self.t.sample([1000])).mean(1).shape)
+
+
+    def sample(self, num_samples=1):
+        """
+        Sample from image distribution through rejection sampling
+        :param num_samples: Number of samples to draw
+        :return: Samples
+        """
+
+        return self.t.sample([num_samples])
 
     def log_prob(self, z):
-        z_ = z - self.loc
+        #print('~~~0',self.loc.is_leaf,self.scale.is_leaf,self.w.is_leaf)
+        return self.t.log_prob(z).mean(1)
 
-        Sig = torch.matmul(self.W.T, self.W) + torch.exp(
-            self.log_sigma * 2
-        ) * torch.eye(self.dim, dtype=self.loc.dtype, device=self.loc.device)
-        log_p = (
-            self.dim / 2 * np.log(2 * np.pi)
-            - 0.5 * torch.det(Sig)
-            - 0.5 * torch.sum(z_ * torch.matmul(z_, torch.inverse(Sig)), 1)
-        )
 
-        return log_p
+    def forward(self, num_samples=1):
+        #print('~~~1',self.gmm.mixture_distribution.probs)
+        
+        z = self.sample(num_samples)
+        log_prob= self.log_prob(z)
+        return z, log_prob
+
+class TMV(BaseDistribution):
+    """
+    Multivariate T
+    """
+    def __init__(self, n_dim=2, df = 3., trainable=False):
+        """
+        Constructor
+        :param shape: Tuple with shape of data, if int shape has one dimension
+        """
+        super().__init__()
+
+        
+        self.n_dim = n_dim
+        rank = n_dim + n_dim
+        tdf = torch.rand((1,), device='cuda').exp()
+        tdf = tdf - tdf + df
+        
+        tloc = torch.randn((1,) + (n_dim,), device='cuda')
+        tcov = torch.randn((1,) + (n_dim, rank),device='cuda')
+        tcov = tcov.matmul(tcov.transpose(-1, -2))
+        tscale_tril = tcov.cholesky()        
+
+
+        with torch.no_grad():
+            if trainable:
+                self.df = nn.Parameter(tdf.double(), requires_grad = True)
+                self.loc = nn.Parameter(tloc.double(), requires_grad = True)
+                self.scale = nn.Parameter(tscale_tril.double(), requires_grad = True)
+
+                
+            else:
+                self.register_buffer("df", tdf)
+                self.register_buffer("loc", tloc)
+                self.register_buffer("scale", tscale_tril)
+
+        self.t = MultivariateStudentT(self.df, self.loc, self.scale)#univ
+        #print('~~~1',self.gmm.mixture_distribution.probs)
+
+
+    def forward(self, num_samples=1):
+        #print('~~~1',self.gmm.mixture_distribution.probs)
+        #print(self.t.loc.dtype,self.t.df.dtype,self.t.scale_tril.dtype)
+        
+        z = self.t.sample([num_samples])
+        
+        
+        log_prob= self.t.log_prob(z).mean(axis=1)
+        #print(z.shape,log_prob.shape)
+        return z.squeeze(), log_prob
+
+    def log_prob(self, z):
+        #print('~~~0',self.loc.is_leaf,self.scale.is_leaf,self.w.is_leaf)
+
+        return self.t.log_prob(z[:,None,:]).mean(axis=1)
+
+
+class MultivariateGaussian(BaseDistribution):
+    """
+    Multivariate Gaussian distribution with diagonal covariance matrix
+    """
+    def __init__(self, n_dim=2, trainable=False, loc = 5., scale = 2.):
+        """
+        Constructor
+        :param shape: Tuple with shape of data, if int shape has one dimension
+        """
+        super().__init__()
+
+        
+        self.n_dim = n_dim
+
+        with torch.no_grad():
+            if trainable:
+                
+                self.loc = nn.Parameter(torch.randn(self.n_dim).double().cuda() * loc)
+                Sigma_k = torch.rand(self.n_dim, self.n_dim) * scale
+                Sigma_k = torch.mm(Sigma_k, Sigma_k.t()).cuda()
+                #Sigma_k.add_(torch.eye(512))
+                self.scale = nn.Parameter(torch.eye(self.n_dim,dtype=torch.double,device='cuda') + Sigma_k, requires_grad = True)
+            else:
+                
+                self.register_buffer("loc", torch.zeros(self.n_dim,dtype=torch.double,device='cuda')+loc)
+                self.register_buffer("scale", torch.eye(self.n_dim,dtype=torch.double,device='cuda')+scale)
+
+        self.mvn = D.MultivariateNormal(self.loc, self.scale)
+        
+    def forward(self, num_samples=1):
+        #print('~~~1',self.gmm.mixture_distribution.probs)
+        
+        z = self.mvn.sample([num_samples])
+        #print(z)
+        log_prob= self.mvn.log_prob(z)
+        return z, log_prob
+
+    def log_prob(self, z):
+        #print('~~~0',self.loc.is_leaf,self.scale.is_leaf,self.w.is_leaf)
+
+        return self.mvn.log_prob(z)
+
+
+
+
+
+
+class MixtureofGeneralizedGaussians(BaseDistribution):
+    """
+    Multivariate Gaussian distribution with diagonal covariance matrix
+    """
+    def __init__(self, n_dim=2, n_components = 3, beta=2.,loc=5.,scale=2., trainable=False, prop_scale=torch.tensor(6.),
+                 prop_shift=torch.tensor(-3.)):
+        """
+        Constructor
+        :param shape: Tuple with shape of data, if int shape has one dimension
+        """
+        super().__init__()
+
+        self.n_components = n_components
+        self.n_dim = n_dim
+        self.beta = beta
+        self.register_buffer("prop_scale", prop_scale)
+        self.register_buffer("prop_shift", prop_shift)
+        self.max_log_prob = 0.
+
+        self.gmm = []
+        with torch.no_grad():
+            for _ in range(self.n_dim):
+                if trainable:
+
+                    self.w = nn.Parameter(torch.rand(self.n_components).cuda())
+                    self.loc = nn.Parameter(torch.randn([self.n_components,self.n_dim]).cuda() * loc)
+                    self.scale = nn.Parameter(torch.rand([self.n_components,self.n_dim]).cuda() * scale)
+                    self.p = nn.Parameter(torch.rand(self.n_dim).cuda()+self.beta,requires_grad=True)
+                    self.mix = D.Categorical(self.w)
+                    self.comp = D.Independent(GeneralizedNormal(self.loc, self.scale,self.p), 1)
+                    self.gmm = D.MixtureSameFamily(self.mix, self.comp)
+                    #print('shape===============',self.gmm.sample([1000]).shape,self.gmm.log_prob(self.gmm.sample([1000])).shape)
+
+                # else:
+                #     self.register_buffer("w", torch.rand(self.n_components))
+                #     self.mix = D.Categorical(self.w)
+                #     self.register_buffer("loc", torch.rand([self.n_components,self.n_dim]))
+                #     self.register_buffer("scale", torch.rand([self.n_components,self.n_dim]))
+                #     self.register_buffer("p", torch.tensor(self.beta))
+                #     self.comp = D.Independent(GenNormal(self.loc, self.scale,self.p), 1)
+                #     self.gmm = D.MixtureSameFamily(self.mix, self.comp)
+                    
+
+
+
+    def sample(self, num_samples=1):
+        """
+        Sample from image distribution through rejection sampling
+        :param num_samples: Number of samples to draw
+        :return: Samples
+        """
+
+        return self.gmm.sample([num_samples])
+
+    def log_prob(self, z):
+        #print('~~~0',self.loc.is_leaf,self.scale.is_leaf,self.w.is_leaf)
+        return self.gmm.log_prob(z)
+
+
+    def forward(self, num_samples=1):
+        #print('~~~1',self.gmm.mixture_distribution.probs)
+        
+        z = self.sample(num_samples)
+        log_prob= self.log_prob(z)
+        return z, log_prob
+
+class GeneralizedGaussiansDistribution(BaseDistribution):
+    """
+    Multivariate Gaussian distribution with diagonal covariance matrix
+    """
+    def __init__(self, n_dim=2, beta=2.,loc=5.,scale=2., trainable=False, prop_scale=torch.tensor(6.),
+                 prop_shift=torch.tensor(-3.)):
+        """
+        Constructor
+        :param shape: Tuple with shape of data, if int shape has one dimension
+        """
+        super().__init__()
+
+        
+        self.n_dim = n_dim
+        self.beta = beta
+        self.register_buffer("prop_scale", prop_scale)
+        self.register_buffer("prop_shift", prop_shift)
+        self.max_log_prob = 0.
+
+        self.gmm = []
+        with torch.no_grad():
+            for _ in range(self.n_dim):
+                if trainable:
+
+                    self.loc = nn.Parameter(torch.randn(self.n_dim).cuda() * loc)
+                    self.scale = nn.Parameter(torch.rand(self.n_dim).cuda() * scale)
+                    self.beta = nn.Parameter(torch.rand(self.n_dim).cuda()+self.beta,requires_grad=True)
+                    self.gmm = GeneralizedNormal(loc=self.loc, scale=self.scale,beta=self.beta)
+                    #print('shape===============',self.gmm.sample([1000]).shape,self.gmm.log_prob(self.gmm.sample([1000])).shape)
+
+                # else:
+                #     self.register_buffer("w", torch.rand(self.n_components))
+                #     self.mix = D.Categorical(self.w)
+                #     self.register_buffer("loc", torch.rand([self.n_components,self.n_dim]))
+                #     self.register_buffer("scale", torch.rand([self.n_components,self.n_dim]))
+                #     self.register_buffer("p", torch.tensor(self.beta))
+                #     self.comp = D.Independent(GenNormal(self.loc, self.scale,self.p), 1)
+                #     self.gmm = D.MixtureSameFamily(self.mix, self.comp)
+                    
+
+
+
+    def sample(self, num_samples=1):
+        """
+        Sample from image distribution through rejection sampling
+        :param num_samples: Number of samples to draw
+        :return: Samples
+        """
+
+        return self.gmm.sample([num_samples])
+
+    def log_prob(self, z):
+        #print('~~~0',self.loc.is_leaf,self.scale.is_leaf,self.w.is_leaf)
+        return self.gmm.log_prob(z).mean(1)
+
+
+    def forward(self, num_samples=1):
+        #print('~~~1',self.gmm.mixture_distribution.probs)
+        
+        z = self.sample(num_samples)
+        log_prob= self.log_prob(z)
+        return z, log_prob
+
+
+class MixtureofT(BaseDistribution):
+    """
+    Multivariate Gaussian distribution with diagonal covariance matrix
+    """
+    def __init__(self, n_dim=2, n_components = 3, df=2.,loc=5.,scale=2., trainable=False, prop_scale=torch.tensor(6.),
+                 prop_shift=torch.tensor(-3.)):
+        """
+        Constructor
+        :param shape: Tuple with shape of data, if int shape has one dimension
+        """
+        super().__init__()
+
+        self.n_components = n_components
+        self.n_dim = n_dim
+        self.df = df
+        self.register_buffer("prop_scale", prop_scale)
+        self.register_buffer("prop_shift", prop_shift)
+        self.max_log_prob = 0.
+
+        self.gmm = []
+        with torch.no_grad():
+            for _ in range(self.n_dim):
+                if trainable:
+
+                    self.w = nn.Parameter(torch.rand(self.n_components).cuda())
+                    self.loc = nn.Parameter(torch.randn([self.n_components,self.n_dim]).cuda() * loc)
+                    self.scale = nn.Parameter(torch.rand([self.n_components,self.n_dim]).cuda() * scale)
+                    self.df = nn.Parameter(torch.rand(self.n_dim).cuda()+self.df,requires_grad=True)
+                    self.mix = D.Categorical(self.w)
+                    #univ
+                    self.comp = D.Independent(D.StudentT(df=self.df, loc=self.loc, scale=self.scale), 1)
+                    self.gmm = D.MixtureSameFamily(self.mix, self.comp)
+                    #print('shape===============',self.gmm.sample([1000]).shape,self.gmm.log_prob(self.gmm.sample([1000])).shape)
+
+                # else:
+                #     self.register_buffer("w", torch.rand(self.n_components))
+                #     self.mix = D.Categorical(self.w)
+                #     self.register_buffer("loc", torch.rand([self.n_components,self.n_dim]))
+                #     self.register_buffer("scale", torch.rand([self.n_components,self.n_dim]))
+                #     self.register_buffer("p", torch.tensor(self.beta))
+                #     self.comp = D.Independent(GenNormal(self.loc, self.scale,self.p), 1)
+                #     self.gmm = D.MixtureSameFamily(self.mix, self.comp)
+                    
+
+
+
+    def sample(self, num_samples=1):
+        """
+        Sample from image distribution through rejection sampling
+        :param num_samples: Number of samples to draw
+        :return: Samples
+        """
+
+        return self.gmm.sample([num_samples])
+
+    def log_prob(self, z):
+        #print('~~~0',self.loc.is_leaf,self.scale.is_leaf,self.w.is_leaf)
+        return self.gmm.log_prob(z)
+
+
+    def forward(self, num_samples=1):
+        #print('~~~1',self.gmm.mixture_distribution.probs)
+        
+        z = self.sample(num_samples)
+        log_prob= self.log_prob(z)
+        return z, log_prob
+
+

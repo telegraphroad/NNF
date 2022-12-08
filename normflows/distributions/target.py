@@ -1,7 +1,11 @@
 import numpy as np
 import torch
 from torch import nn
-
+from torch.distributions import MultivariateNormal, Normal
+from scipy.stats import multivariate_t, lognorm, cauchy, invweibull, pareto, chi2
+import sklearn.datasets
+from sklearn.utils import shuffle as util_shuffle
+import torch.distributions as D
 
 class Target(nn.Module):
     """
@@ -59,6 +63,191 @@ class Target(nn.Module):
             ind = np.min([len(z_), num_samples - len(z)])
             z = torch.cat([z, z_[:ind, :]], 0)
         return z
+
+class NealsFunnel(Target):
+    """
+    Bimodal two-dimensional distribution
+    """
+    def __init__(self,prop_scale=torch.tensor(20.),
+                 prop_shift=torch.tensor(-10.), v1shift = 0., v2shift = 0.):
+        super().__init__()
+        self.n_dims = 2
+        self.max_log_prob = 0.
+        self.v1shift = v1shift
+        self.v2shift = v2shift
+        self.register_buffer("prop_scale", prop_scale)
+        self.register_buffer("prop_shift", prop_shift)
+
+
+    # def sample(self, num_samples=1):
+    #     """
+    #     :param num_samples: Number of samples to draw
+    #     :return: Samples
+    #     """
+    #     data = []
+    #     n_dims = 1
+    #     for i in range(nsamples):
+    #         v = norm(0, 1).rvs(1)
+    #         x = norm(0, np.exp(0.5*v)).rvs(n_dims)
+    #         data.append(np.hstack([v, x]))
+    #     data = pd.DataFrame(data)
+    #     return torch.tensor(data.values)
+
+    def log_prob(self, z):
+        """
+        :param z: value or batch of latent variable
+        :return: log probability of the distribution for z
+        """
+        #print('++++++++++',z)
+        v = z[:,0].cpu()
+        x = z[:,1].cpu()
+        v_like = Normal(torch.tensor([0.0]).cpu(), torch.tensor([1.0]).cpu() + self.v1shift).log_prob(v).cpu()
+        x_like = Normal(torch.tensor([0.0]).cpu(), torch.exp(0.5*v).cpu() + self.v2shift).log_prob(x).cpu()
+        return v_like + x_like
+
+
+class StudentTDist(Target):
+    """
+    Bimodal two-dimensional distribution
+    """
+    def __init__(self,df=2.,dim=2):
+        super().__init__()
+        self.df = df
+        self.loc = np.repeat([0.],dim)
+
+    def sample(self, num_samples=1):
+        """
+        :param num_samples: Number of samples to draw
+        :return: Samples
+        """
+        return torch.tensor(multivariate_t(loc=self.loc,df=self.df).rvs(num_samples),device='cuda')
+
+    def log_prob(self, z):
+        """
+        :param z: value or batch of latent variable
+        :return: log probability of the distribution for z
+        """
+        return torch.tensor(multivariate_t(loc=self.loc,df=self.df).logpdf(z.cpu().detach().numpy()),device='cuda')
+
+
+
+class chi2Dist(Target):
+    """
+    Bimodal two-dimensional distribution
+    """
+    def __init__(self,df=2.,dim=2):
+        super().__init__()
+        self.df = df
+        self.loc = np.repeat([0.],dim)
+
+    def sample(self, num_samples=1):
+        """
+        :param num_samples: Number of samples to draw
+        :return: Samples
+        """
+        return torch.tensor(chi2(loc=self.loc,df=self.df).rvs(num_samples),device='cuda')
+
+    def log_prob(self, z):
+        """
+        :param z: value or batch of latent variable
+        :return: log probability of the distribution for z
+        """
+        return torch.tensor(chi2(loc=self.loc,df=self.df).logpdf(z.cpu().detach().numpy()),device='cuda')
+
+
+class FrechetDist(Target):
+    """
+    Bimodal two-dimensional distribution
+    """
+    def __init__(self,c=2.,dim=2):
+        super().__init__()
+        self.c = c
+        self.loc = np.repeat([0.],dim)
+
+    def sample(self, num_samples=1):
+        """
+        :param num_samples: Number of samples to draw
+        :return: Samples
+        """
+        return torch.tensor(invweibull(loc=self.loc,c=self.c).rvs(num_samples),device='cuda')
+
+    def log_prob(self, z):
+        """
+        :param z: value or batch of latent variable
+        :return: log probability of the distribution for z
+        """
+        return torch.tensor(invweibull(loc=self.loc,c=self.c).logpdf(z.cpu().detach().numpy()),device='cuda')
+
+
+class ParetoDist(Target):
+    """
+    Bimodal two-dimensional distribution
+    """
+    def __init__(self,b=2.,dim=2):
+        super().__init__()
+        self.b = b
+        self.loc = np.repeat([0.],dim)
+
+    def sample(self, num_samples=1):
+        """
+        :param num_samples: Number of samples to draw
+        :return: Samples
+        """
+        return torch.tensor(pareto(loc=self.loc,b=self.b).rvs(num_samples),device='cuda')
+
+    def log_prob(self, z):
+        """
+        :param z: value or batch of latent variable
+        :return: log probability of the distribution for z
+        """
+        return torch.tensor(pareto(loc=self.loc,b=self.b).logpdf(z.cpu().detach().numpy()),device='cuda')
+
+
+class CauchyDist(Target):
+    """
+    Bimodal two-dimensional distribution
+    """
+    def __init__(self,dim=2):
+        super().__init__()
+        self.loc = np.repeat([0.],dim)
+
+    def sample(self, num_samples=1):
+        """
+        :param num_samples: Number of samples to draw
+        :return: Samples
+        """
+        return torch.tensor(cauchy(loc=self.loc).rvs(num_samples),device='cuda')
+
+    def log_prob(self, z):
+        """
+        :param z: value or batch of latent variable
+        :return: log probability of the distribution for z
+        """
+        return torch.tensor(cauchy(loc=self.loc).logpdf(z.cpu().detach().numpy()),device='cuda')
+
+
+class LogNormDist(Target):
+    """
+    Bimodal two-dimensional distribution
+    """
+    def __init__(self,s=2.,dim=2):
+        super().__init__()
+        self.s = s
+        self.loc = np.repeat([0.],dim)
+
+    def sample(self, num_samples=1):
+        """
+        :param num_samples: Number of samples to draw
+        :return: Samples
+        """
+        return torch.tensor(lognorm(loc=self.loc,s=self.s).rvs(num_samples),device='cuda')
+
+    def log_prob(self, z):
+        """
+        :param z: value or batch of latent variable
+        :return: log probability of the distribution for z
+        """
+        return torch.tensor(lognorm(loc=self.loc,s=self.s).logpdf(z.cpu().detach().numpy()),device='cuda')
 
 
 class TwoMoons(Target):

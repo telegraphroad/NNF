@@ -3,3 +3,11 @@
 */*.pyc
 */*/*.pyc
 */*/*/*.pyc
+run/*
+run/*/*
+run/*/*/*/*
+run/*/*/*/*/*
+*.png
+*.ph
+logs/*
+logs/*/*
